@@ -90,7 +90,7 @@ SELECT DISTINCT ?person ?name WHERE {
     FILTER(LANG(?name) = "en")
 }
 ORDER BY ?name
-LIMIT 300
+LIMIT 3000
 """
 
 
@@ -160,7 +160,7 @@ class EntityFetcher:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     fetcher = EntityFetcher()
-    entities = fetcher.fetch_mixed(limit=100)
+    entities = fetcher.fetch_mixed(limit=1000)
 
     print(f"\n{'=' * 70}")
     print(f"Найдено {len(entities)} сущностей")

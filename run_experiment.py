@@ -7,6 +7,7 @@ from pathlib import Path
 
 import neo4j
 import pandas as pd
+import numpy as np
 from scipy import stats
 
 from config import CONFIG
@@ -22,6 +23,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("experiment")
 
+
+# ----------------------------------------------------------------------
+# Шаг 0: Калибровка GCR
+# ----------------------------------------------------------------------
 def step0_calibrate_gcr(driver, qa_pairs):
     """Калибровка порога GCR на первых N примерах."""
     logger.info("=" * 70)
@@ -30,11 +35,10 @@ def step0_calibrate_gcr(driver, qa_pairs):
 
     from baseline_vector_rag import BaselineVectorRAG
     from gcr import Neo4jGraphLoader, GraphContextRelevance
-    from config import CONFIG as C
 
     baseline = BaselineVectorRAG(driver)
     loader = Neo4jGraphLoader(
-        C.neo4j.uri, (C.neo4j.user, C.neo4j.password), C.neo4j.database,
+        CONFIG.neo4j.uri, (CONFIG.neo4j.user, CONFIG.neo4j.password), CONFIG.neo4j.database,
     )
     G = loader.load_graph(node_label="Resource")
     gcr = GraphContextRelevance(G)
@@ -42,9 +46,10 @@ def step0_calibrate_gcr(driver, qa_pairs):
     scores = []
     for pair in qa_pairs[:20]:
         result = baseline.retriever.search(query_text=pair.question, top_k=5)
+        # В новой версии neo4j-graphrag URI хранится в metadata['id']
         uris = [
-            item.metadata.get("uri") for item in result.items
-            if item.metadata and item.metadata.get("uri")
+            item.metadata.get("id") for item in result.items
+            if item.metadata and item.metadata.get("id")
         ]
         if not uris:
             continue
@@ -59,11 +64,14 @@ def step0_calibrate_gcr(driver, qa_pairs):
     loader.close()
 
     if scores:
-        import numpy as np
         logger.info("GCR распределение: min=%.3f median=%.3f max=%.3f",
                     np.min(scores), np.median(scores), np.max(scores))
         suggested = float(np.median(scores)) * 0.7
         logger.info("Рекомендуемый порог: %.3f", suggested)
+    else:
+        logger.warning("Не удалось собрать GCR-скоры для калибровки.")
+
+
 # ----------------------------------------------------------------------
 # Шаг 1
 # ----------------------------------------------------------------------
@@ -72,7 +80,7 @@ def step1_setup_graph():
     logger.info("ШАГ 1: Загрузка DBpedia в Neo4j + векторный индекс")
     logger.info("=" * 70)
 
-    loader = HybridDBpediaLoader(entity_limit=100)
+    loader = HybridDBpediaLoader(entity_limit=1000)
     try:
         loader.run()
     finally:
@@ -90,7 +98,12 @@ def step2_build_dataset():
     dataset_path = "eval_dataset.json"
     if Path(dataset_path).exists():
         logger.info("Загрузка существующего датасета: %s", dataset_path)
-        return EvalDatasetBuilder.load(dataset_path)
+        pairs = EvalDatasetBuilder.load(dataset_path)
+        # Если датасет уже есть, но в нём меньше 100 пар — перегенерируем
+        if len(pairs) >= 100:
+            return pairs
+        logger.warning("Датасет содержит только %d пар. Перегенерируем.", len(pairs))
+        Path(dataset_path).unlink()
 
     from neo4j_graphrag.llm import OllamaLLM
     llm = OllamaLLM(
@@ -105,10 +118,12 @@ def step2_build_dataset():
     )
     try:
         builder = EvalDatasetBuilder(driver, llm)
-        abstracts = builder.fetch_abstracts(limit=500)
+        # Увеличиваем лимит до 1000, чтобы захватить больше abstracts
+        abstracts = builder.fetch_abstracts(limit=1000)
         logger.info("Найдено %d abstracts", len(abstracts))
 
-        pairs = builder.generate_qa_pairs(abstracts, n=CONFIG.eval_dataset_size)
+        # Генерируем до 200 QA-пар (или сколько позволяет датасет)
+        pairs = builder.generate_qa_pairs(abstracts, n=200)
         builder.save(pairs, dataset_path)
         return pairs
     finally:
@@ -116,7 +131,7 @@ def step2_build_dataset():
 
 
 # ----------------------------------------------------------------------
-# Шаг 3-4
+# Шаг 3
 # ----------------------------------------------------------------------
 def step3_run_baseline(driver, qa_pairs):
     logger.info("=" * 70)
@@ -200,41 +215,41 @@ def step5_evaluate(qa_pairs, baseline_data, gcr_data):
     evaluator = Evaluator()
 
     logger.info("Оценка baseline...")
-    baseline_metrics = evaluator.evaluate(
+    baseline_result = evaluator.evaluate(
         questions,
         baseline_data["answers"],
         baseline_data["contexts"],
         ground_truths,
     )
-    logger.info("Baseline: %s", baseline_metrics.to_dict())
+    logger.info("Baseline: %s", baseline_result.to_dict())
 
     logger.info("Оценка GCR...")
-    gcr_metrics = evaluator.evaluate(
+    gcr_result = evaluator.evaluate(
         questions,
         gcr_data["answers"],
         gcr_data["contexts"],
         ground_truths,
     )
-    logger.info("GCR: %s", gcr_metrics.to_dict())
-    baseline_df = baseline_metrics.df  # RAGAS возвращает DataFrame
-    gcr_df = gcr_metrics.df
+    logger.info("GCR: %s", gcr_result.metrics.to_dict())
 
-    return baseline_df, gcr_df
+    # Возвращаем DataFrame с per-sample метриками для Wilcoxon
+    return baseline_result.df, gcr_result.df, baseline_result.metrics, gcr_result.metrics
 
 
 # ----------------------------------------------------------------------
 # Шаг 6
 # ----------------------------------------------------------------------
-def step6_statistical_tests(baseline_metrics_df, gcr_metrics_df):
+def step6_statistical_tests(baseline_df: pd.DataFrame, gcr_df: pd.DataFrame):
     """Wilcoxon по per-sample метрикам RAGAS."""
-    from scipy import stats
+    logger.info("=" * 70)
+    logger.info("ШАГ 6: Статистические тесты")
+    logger.info("=" * 70)
 
     results = {}
     for metric in ["faithfulness", "answer_relevancy", "context_precision"]:
-        b = baseline_metrics_df[metric].values
-        g = gcr_metrics_df[metric].values
+        b = baseline_df[metric].values
+        g = gcr_df[metric].values
 
-        # Убираем NaN пары
         mask = ~(pd.isna(b) | pd.isna(g))
         b, g = b[mask], g[mask]
 
@@ -242,17 +257,33 @@ def step6_statistical_tests(baseline_metrics_df, gcr_metrics_df):
             results[metric] = {"stat": None, "p": None, "n": len(b)}
             continue
 
-        stat, p = stats.wilcoxon(b, g)
-        results[metric] = {
-            "stat": float(stat),
-            "p": float(p),
-            "n": int(len(b)),
-            "significant": p < 0.05,
-        }
-        logger.info("%s: Wilcoxon stat=%.2f, p=%.4f, n=%d, %s",
-                    metric, stat, p, len(b),
-                    "SIGNIFICANT" if p < 0.05 else "not significant")
+        try:
+            stat, p = stats.wilcoxon(b, g)
+            results[metric] = {
+                "stat": float(stat),
+                "p": float(p),
+                "n": int(len(b)),
+                "significant": p < 0.05,
+            }
+            logger.info("%s: Wilcoxon stat=%.2f, p=%.4f, n=%d, %s",
+                        metric, stat, p, len(b),
+                        "SIGNIFICANT" if p < 0.05 else "not significant")
+        except Exception as e:
+            logger.warning("Wilcoxon для %s не удался: %s", metric, e)
+            results[metric] = {"stat": None, "p": None, "n": len(b)}
+
+    # Дополнительно считаем rejection stats
+    results["rejection"] = {
+        "baseline_insufficient": sum(
+            1 for a in baseline_df.get("answer", []) if "insufficient" in str(a).lower()
+        ) if "answer" in baseline_df.columns else 0,
+        "gcr_insufficient": sum(
+            1 for a in gcr_df.get("answer", []) if "insufficient" in str(a).lower()
+        ) if "answer" in gcr_df.columns else 0,
+    }
+
     return results
+
 
 # ----------------------------------------------------------------------
 # Шаг 7
@@ -293,7 +324,13 @@ def step7_save_results(baseline_metrics, gcr_metrics, baseline_data, gcr_data, s
     print(f"\nBaseline time: {baseline_data['time']:.1f}s")
     print(f"GCR time:      {gcr_data['time']:.1f}s")
     print(f"GCR отбраковано: {gcr_data['rejected']}/{len(baseline_data['answers'])}")
-    print(f"Wilcoxon p-value: {stats_result['wilcoxon_p']}")
+
+    # Красивый вывод Wilcoxon
+    for metric, res in stats_result.items():
+        if metric == "rejection":
+            continue
+        if res.get("p") is not None:
+            print(f"Wilcoxon {metric}: p={res['p']:.4f} (n={res['n']})")
 
     comparison.to_csv(f"{CONFIG.results_dir}/comparison.csv", index=False)
 
@@ -331,11 +368,9 @@ def main():
         CONFIG.neo4j.uri,
         auth=(CONFIG.neo4j.user, CONFIG.neo4j.password),
     )
-    step0_calibrate_gcr(
-            driver, qa_pairs
-        )
-    
     try:
+        step0_calibrate_gcr(driver, qa_pairs)
+
         # Шаг 3: baseline
         b_answers, b_contexts, b_meta, b_time = step3_run_baseline(driver, qa_pairs)
         baseline_data = {
@@ -354,15 +389,16 @@ def main():
             "time": g_time,
             "rejected": rejected,
         }
-
     finally:
         driver.close()
 
     # Шаг 5: RAGAS
-    baseline_metrics, gcr_metrics = step5_evaluate(qa_pairs, baseline_data, gcr_data)
+    baseline_df, gcr_df, baseline_metrics, gcr_metrics = step5_evaluate(
+        qa_pairs, baseline_data, gcr_data
+    )
 
     # Шаг 6: статистика
-    stats_result = step6_statistical_tests(baseline_data, gcr_data, qa_pairs)
+    stats_result = step6_statistical_tests(baseline_df, gcr_df)
 
     # Шаг 7: сохранение
     step7_save_results(baseline_metrics, gcr_metrics, baseline_data, gcr_data, stats_result)

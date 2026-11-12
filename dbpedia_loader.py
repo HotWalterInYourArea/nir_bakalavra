@@ -1,3 +1,7 @@
+"""
+Гибридный загрузчик: DBpedia SPARQL + Wikipedia REST + n10s.
+Оптимизирован для больших датасетов (1000+ сущностей).
+"""
 from __future__ import annotations
 
 import json
@@ -19,16 +23,13 @@ logger = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------------------------
-# Кэш сущностей: чтобы не дёргать DBpedia при каждом запуске
+# Кэш сущностей
 # ----------------------------------------------------------------------
 ENTITIES_CACHE = "entities.json"
 
 
-def get_target_entities(limit: int = 100) -> list[str]:
-    """
-    Возвращает список title'ов сущностей для загрузки.
-    Кэширует результат в entities.json.
-    """
+def get_target_entities(limit: int = 1000) -> list[str]:
+    """Возвращает список title'ов сущностей для загрузки."""
     if Path(ENTITIES_CACHE).exists():
         logger.info("Загрузка сущностей из кэша: %s", ENTITIES_CACHE)
         with open(ENTITIES_CACHE, "r", encoding="utf-8") as f:
@@ -56,26 +57,24 @@ def get_target_entities(limit: int = 100) -> list[str]:
 
 
 def _fallback_entities() -> list[str]:
-    """Резервный список, если DBpedia недоступна."""
     return [
         "Albert_Einstein", "Marie_Curie", "Isaac_Newton", "Nikola_Tesla",
         "Charles_Darwin", "Ada_Lovelace", "Leonardo_da_Vinci", "Galileo_Galilei",
-        "Stephen_Hawking", "Richard_Feynman", "Niels_Bohr", "Max_Planck",
-        "Erwin_Schrödinger", "Werner_Heisenberg", "Michael_Faraday",
-        "James_Clerk_Maxwell", "Louis_Pasteur", "Gregor_Mendel",
-        "Alan_Turing", "John_von_Neumann",
     ]
 
 
 # ----------------------------------------------------------------------
-# SPARQL CONSTRUCT для структурных связей
+# SPARQL CONSTRUCT (упрощённый, без сложного экранирования — APOC сделает это)
 # ----------------------------------------------------------------------
 def build_sparql_query(titles: list) -> str:
-    """Строит SPARQL CONSTRUCT для списка сущностей."""
-    # Ограничиваем до 150 сущностей — публичный эндпоинт не любит
-    # слишком большие VALUES-блоки
-    titles = titles[:150]
-    values = " ".join(f"dbr:{t}" for t in titles)
+    SPECIAL_CHARS = ['_', '~', '.', '-', '!', '$', '&', "'", '(', ')', '*', '+', ',', ';', '=', '/', '?', '#', '@', '%']
+
+    def escape_dbpedia_name(name: str) -> str:
+        """Экранирует специальные символы для SPARQL prefixed name."""
+        return ''.join(['\\' + c if c in SPECIAL_CHARS else c for c in name])
+    """Строит SPARQL CONSTRUCT для батча сущностей."""
+    escaped = [escape_dbpedia_name(t) for t in titles]
+    values = " ".join(f"dbr:{t}" for t in escaped)
     return f"""
 PREFIX dbo: <http://dbpedia.org/ontology/>
 PREFIX dbr: <http://dbpedia.org/resource/>
@@ -137,7 +136,7 @@ def fetch_wikipedia_extract(title: str, timeout: int = 15) -> str:
         return ""
 
 
-def fetch_all_extracts(titles: list, max_workers: int = 6) -> dict:
+def fetch_all_extracts(titles: list, max_workers: int = 8) -> dict:
     results = {}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(fetch_wikipedia_extract, t): t for t in titles}
@@ -165,7 +164,7 @@ class LoadStats:
 
 
 class HybridDBpediaLoader:
-    def __init__(self, entity_limit: int = 100):
+    def __init__(self, entity_limit: int = 1000):
         self.driver = neo4j.GraphDatabase.driver(
             CONFIG.neo4j.uri,
             auth=(CONFIG.neo4j.user, CONFIG.neo4j.password),
@@ -207,41 +206,51 @@ class HybridDBpediaLoader:
         except Exception as e:
             logger.warning("Constraint: %s", e)
 
-    # ------------------------------------------------------------------
     def import_structural_triples(self):
-        query = build_sparql_query(self.entities)
-        encoded = urllib.parse.quote(query)
-
-        logger.info("Импорт структурных троек для %d сущностей...", len(self.entities))
-        cypher = f"""
-        CALL n10s.rdf.import.fetch(
-            "{self.endpoint}", "Turtle",
-            {{
-                headerParams: {{ Accept: "application/turtle" }},
-                payload: "query={encoded}"
-            }}
-        )
-        YIELD triplesLoaded, extraInfo
-        RETURN triplesLoaded, extraInfo
-        """
-        try:
-            result = self._run(cypher)
-            if result:
-                loaded = result[0].get("triplesLoaded", 0)
-                self.stats.triples_imported = loaded
-                logger.info("Импортировано %d триплетов", loaded)
-                if loaded == 0:
-                    logger.warning("extraInfo: %s", result[0].get("extraInfo", ""))
-            return self.stats.triples_imported
-        except Exception as e:
-            logger.error("Ошибка импорта: %s", e)
-            return 0
-
+        """Импортирует триплеты батчами по 50 сущностей."""
+        batch_size = 50
+        total_loaded = 0
+        
+        for i in range(0, len(self.entities), batch_size):
+            batch = self.entities[i:i+batch_size]
+            logger.info("Импорт батча %d-%d из %d...", i, i+len(batch), len(self.entities))
+            
+            query = build_sparql_query(batch)
+            
+            # Кодируем запрос в Python, а не через APOC
+            encoded_query = urllib.parse.quote(query)
+            
+            cypher = """
+            CALL n10s.rdf.import.fetch(
+                $endpoint,
+                "Turtle",
+                {
+                    headerParams: { Accept: "application/turtle" },
+                    payload: "query=" + $encoded
+                }
+            )
+            YIELD triplesLoaded, extraInfo
+            RETURN triplesLoaded, extraInfo
+            """
+            try:
+                result = self._run(cypher, endpoint=self.endpoint, encoded=encoded_query)
+                if result:
+                    loaded = result[0].get("triplesLoaded", 0)
+                    total_loaded += loaded
+                    logger.info("Загружено %d триплетов.", loaded)
+                    if loaded == 0:
+                        logger.warning("extraInfo: %s", result[0].get("extraInfo", ""))
+            except Exception as e:
+                logger.error("Ошибка в батче %d: %s", i, e)
+                
+        self.stats.triples_imported = total_loaded
+        logger.info("Всего импортировано %d триплетов.", total_loaded)
+        return total_loaded
     # ------------------------------------------------------------------
     def attach_wikipedia_extracts(self):
         logger.info("Загрузка abstracts из Wikipedia для %d статей...",
                     len(self.entities))
-        extracts = fetch_all_extracts(self.entities, max_workers=6)
+        extracts = fetch_all_extracts(self.entities, max_workers=8)
 
         hits = sum(1 for v in extracts.values() if v)
         self.stats.wikipedia_hits = hits
@@ -372,10 +381,10 @@ class HybridDBpediaLoader:
         # 2. n10s setup
         self.setup_n10s()
 
-        # 3. Импорт структурных троек
+        # 3. Импорт структурных троек (батчами)
         self.import_structural_triples()
 
-        # 4. Гарантируем узлы (если n10s что-то пропустил)
+        # 4. Гарантируем узлы
         self._ensure_target_nodes()
 
         # 5. Тексты из Wikipedia
@@ -396,7 +405,7 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    loader = HybridDBpediaLoader(entity_limit=100)
+    loader = HybridDBpediaLoader(entity_limit=1000)  # <--- Увеличено до 1000
     try:
         stats = loader.run()
         print("\n" + "=" * 60)

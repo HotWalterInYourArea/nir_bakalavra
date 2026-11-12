@@ -10,10 +10,11 @@ load_dotenv()
 
 @dataclass
 class Neo4jConfig:
-    uri: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    uri: str = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
     user: str = os.getenv("NEO4J_USER", "neo4j")
-    password: str = os.getenv("NEO4J_PASSWORD", "password")
+    password: str = os.getenv("NEO4J_PASSWORD", "password123")
     database: str = os.getenv("NEO4J_DATABASE", "neo4j")
+    max_connection_pool_size: int = 100
 
 
 @dataclass
@@ -53,8 +54,8 @@ class ExperimentConfig:
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     gcr: GCRConfig = field(default_factory=GCRConfig)
-    eval_dataset_size: int = 100
-    top_k: int = 5
+    eval_dataset_size: int = 200
+    top_k: int = 10  
     results_dir: str = "results"
     seed: int = 42
 

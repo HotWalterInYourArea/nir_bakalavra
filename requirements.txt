@@ -2,9 +2,9 @@ neo4j>=5.20.0
 networkx>=3.2
 numpy>=1.26
 neo4j-graphrag[ollama,sentence-transformers]>=1.0
-ragas>=0.2
+ragas>=0.4
 langchain-huggingface>=0.1
-langchain-community>=0.3
+langchain-community<0.4.2
 langchain-ollama>=0.2
 sentence-transformers>=2.7
 pandas>=2.0
