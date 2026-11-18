@@ -22,9 +22,6 @@ from entity_fetcher import EntityFetcher
 logger = logging.getLogger(__name__)
 
 
-# ----------------------------------------------------------------------
-# Кэш сущностей
-# ----------------------------------------------------------------------
 ENTITIES_CACHE = "entities.json"
 
 
@@ -63,16 +60,11 @@ def _fallback_entities() -> list[str]:
     ]
 
 
-# ----------------------------------------------------------------------
-# SPARQL CONSTRUCT (упрощённый, без сложного экранирования — APOC сделает это)
-# ----------------------------------------------------------------------
 def build_sparql_query(titles: list) -> str:
     SPECIAL_CHARS = ['_', '~', '.', '-', '!', '$', '&', "'", '(', ')', '*', '+', ',', ';', '=', '/', '?', '#', '@', '%']
 
     def escape_dbpedia_name(name: str) -> str:
-        """Экранирует специальные символы для SPARQL prefixed name."""
         return ''.join(['\\' + c if c in SPECIAL_CHARS else c for c in name])
-    """Строит SPARQL CONSTRUCT для батча сущностей."""
     escaped = [escape_dbpedia_name(t) for t in titles]
     values = " ".join(f"dbr:{t}" for t in escaped)
     return f"""
@@ -114,9 +106,6 @@ WHERE {{
 """
 
 
-# ----------------------------------------------------------------------
-# Wikipedia REST API
-# ----------------------------------------------------------------------
 WIKI_REST_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
 WIKI_HEADERS = {
     "User-Agent": "BachelorThesis-RAG/1.0 (educational use; contact@example.com)",
@@ -150,9 +139,7 @@ def fetch_all_extracts(titles: list, max_workers: int = 8) -> dict:
     return results
 
 
-# ----------------------------------------------------------------------
-# Основной загрузчик
-# ----------------------------------------------------------------------
+
 @dataclass
 class LoadStats:
     triples_imported: int = 0
@@ -181,7 +168,6 @@ class HybridDBpediaLoader:
         with self.driver.session(database=CONFIG.neo4j.database) as s:
             return [r.data() for r in s.run(query, **params)]
 
-    # ------------------------------------------------------------------
     def setup_n10s(self):
         logger.info("Инициализация n10s...")
         try:
@@ -207,7 +193,6 @@ class HybridDBpediaLoader:
             logger.warning("Constraint: %s", e)
 
     def import_structural_triples(self):
-        """Импортирует триплеты батчами по 50 сущностей."""
         batch_size = 50
         total_loaded = 0
         
@@ -246,7 +231,7 @@ class HybridDBpediaLoader:
         self.stats.triples_imported = total_loaded
         logger.info("Всего импортировано %d триплетов.", total_loaded)
         return total_loaded
-    # ------------------------------------------------------------------
+    
     def attach_wikipedia_extracts(self):
         logger.info("Загрузка abstracts из Wikipedia для %d статей...",
                     len(self.entities))
@@ -280,7 +265,6 @@ class HybridDBpediaLoader:
         self.stats.nodes_with_text = updated
         logger.info("Записано текстов в %d узлов", updated)
 
-    # ------------------------------------------------------------------
     def build_vector_index(self):
         embedder = SentenceTransformer(CONFIG.embedding.model)
 
@@ -329,7 +313,6 @@ class HybridDBpediaLoader:
         self.stats.nodes_with_embeddings = len(rows)
         logger.info("Обновлено %d эмбеддингов", len(rows))
 
-    # ------------------------------------------------------------------
     def diagnose(self):
         logger.info("=" * 60)
         logger.info("ДИАГНОСТИКА ГРАФА")
@@ -348,7 +331,6 @@ class HybridDBpediaLoader:
         for k, v in stats.items():
             logger.info("  %-20s %d", k, v)
 
-    # ------------------------------------------------------------------
     def _ensure_target_nodes(self):
         with self.driver.session(database=CONFIG.neo4j.database) as s:
             for title in self.entities:
@@ -363,7 +345,6 @@ class HybridDBpediaLoader:
                 )
         logger.info("Гарантированы узлы для %d сущностей", len(self.entities))
 
-    # ------------------------------------------------------------------
     def run(self):
         logger.info("=" * 60)
         logger.info("ГИБРИДНАЯ ЗАГРУЗКА DBpedia + Wikipedia")
@@ -371,7 +352,6 @@ class HybridDBpediaLoader:
 
         t0 = time.time()
 
-        # 1. Получаем список сущностей
         self.entities = get_target_entities(limit=self.entity_limit)
         self.stats.total_entities = len(self.entities)
         if not self.entities:
@@ -381,19 +361,14 @@ class HybridDBpediaLoader:
         # 2. n10s setup
         self.setup_n10s()
 
-        # 3. Импорт структурных троек (батчами)
         self.import_structural_triples()
 
-        # 4. Гарантируем узлы
         self._ensure_target_nodes()
 
-        # 5. Тексты из Wikipedia
         self.attach_wikipedia_extracts()
 
-        # 6. Векторный индекс
         self.build_vector_index()
 
-        # 7. Диагностика
         self.diagnose()
 
         logger.info("Загрузка завершена за %.1f сек", time.time() - t0)

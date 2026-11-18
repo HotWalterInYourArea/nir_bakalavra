@@ -19,14 +19,16 @@ _URI_RE = re.compile(r"http://dbpedia\.org/resource/[\w\(\)\,\.\-]+")
 class GCRFilterRetriever:
     def __init__(
         self,
-        vector_retriever: VectorRetriever,
-        graph_loader: Neo4jGraphLoader,
+        vector_retriever,
+        graph_loader=None,
         gcr_threshold: float = 0.35,
-        gcr_config: Optional[GCRConfig] = None,
+        gcr_config=None,
         enable_expansion: bool = True,
         expansion_hops: int = 1,
         max_expanded_nodes: int = 20,
         node_text_property: str = "abstract",
+        graph=None,             # <--- НОВЫЙ параметр
+        gcr_engine=None,        # <--- НОВЫЙ параметр
     ):
         self.vector_retriever = vector_retriever
         self.graph_loader = graph_loader
@@ -36,13 +38,21 @@ class GCRFilterRetriever:
         self.max_expanded_nodes = max_expanded_nodes
         self.node_text_property = node_text_property
 
-        logger.info("Загрузка графа для GCR...")
-        self.graph = graph_loader.load_graph(node_label="Resource")
-        self.gcr = GraphContextRelevance(
-            graph=self.graph,
-            config=gcr_config,
-            node_text_attr="text",
-        )
+        # Если граф и движок уже переданы — используем их
+        if graph is not None and gcr_engine is not None:
+            self.graph = graph
+            self.gcr = gcr_engine
+            logger.info("Используем переданный граф: %d узлов", graph.number_of_nodes())
+        else:
+            # Иначе загружаем из Neo4j
+            logger.info("Загрузка графа для GCR...")
+            self.graph = graph_loader.load_graph(node_label="Resource")
+            self.gcr = GraphContextRelevance(
+                graph=self.graph,
+                config=gcr_config,
+                node_text_attr="text",
+            )
+        
         stats = self.gcr.hub_stats()
         logger.info(
             "Граф: %d узлов, %d рёбер, порог хабов %.2f",
@@ -59,18 +69,15 @@ class GCRFilterRetriever:
         vector_result = self.vector_retriever.search(
             query_text=query_text, top_k=top_k, **kwargs,
         )
-        # === ДИАГНОСТИКА ===
         logger.info("=== VECTOR RESULT ===")
         logger.info("Items count: %d", len(vector_result.items))
         for i, item in enumerate(vector_result.items[:2]):
             logger.info("Item %d metadata: %s", i, item.metadata)
             logger.info("Item %d content: %s", i, item.content[:100] if item.content else None)
-        # ===================
 
         retrieved_uris = self._extract_uris(vector_result.items)
         logger.info("Extracted URIs: %s", retrieved_uris)
         logger.info("Graph has %d nodes", self.graph.number_of_nodes())
-        # Какие из них есть в графе?
         found = [u for u in retrieved_uris if u in self.graph]
         logger.info("URIs found in graph: %d / %d", len(found), len(retrieved_uris))
         if not vector_result.items:
@@ -121,7 +128,6 @@ class GCRFilterRetriever:
         return self._build_expanded_result(expanded_uris, expanded_gcr)
 
     def _extract_uris(self, items) -> list:
-        """Извлекает elementId узлов из результатов VectorRetriever."""
         eids = []
         for item in items:
             if item.metadata and "id" in item.metadata:
@@ -154,7 +160,6 @@ class GCRFilterRetriever:
         return result
 
     def _build_expanded_result(self, eids: list, gcr_result) -> RetrieverResult:
-        """Формирует RetrieverResult из расширенного подграфа."""
         items = []
         for eid in eids:
             if eid not in self.graph:

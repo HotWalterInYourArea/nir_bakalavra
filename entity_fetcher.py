@@ -14,9 +14,7 @@ HEADERS = {
 }
 
 
-# ----------------------------------------------------------------------
-# SPARQL: получить учёных с наибольшим числом связей
-# ----------------------------------------------------------------------
+
 SPARQL_SCIENTISTS = """
 PREFIX dbo: <http://dbpedia.org/ontology/>
 PREFIX dbr: <http://dbpedia.org/resource/>
@@ -35,9 +33,6 @@ LIMIT 200
 """
 
 
-# ----------------------------------------------------------------------
-# Альтернативные запросы для расширения домена
-# ----------------------------------------------------------------------
 SPARQL_PHYSICISTS = """
 PREFIX dbo: <http://dbpedia.org/ontology/>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
@@ -102,7 +97,6 @@ class Entity:
 
 
 class EntityFetcher:
-    """Получает список сущностей из DBpedia по SPARQL."""
 
     def __init__(self, endpoint: str = DBPEDIA_ENDPOINT):
         self.endpoint = endpoint
@@ -128,7 +122,6 @@ class EntityFetcher:
             uri = binding["person"]["value"]
             name = binding["name"]["value"]
 
-            # Извлекаем title для Wikipedia API: часть после /resource/
             if "/resource/" not in uri:
                 continue
             title = uri.split("/resource/")[-1]
@@ -139,7 +132,6 @@ class EntityFetcher:
         return entities
 
     def fetch_mixed(self, limit: int = 200) -> list[Entity]:
-        """Смешанный список: физики, химики, математики, биологи и т.д."""
         entities = self.fetch(SPARQL_MIXED)
         # Дедупликация по URI
         seen = set()
@@ -154,9 +146,6 @@ class EntityFetcher:
         return unique
 
 
-# ----------------------------------------------------------------------
-# CLI: посмотреть, кого вернул запрос
-# ----------------------------------------------------------------------
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     fetcher = EntityFetcher()

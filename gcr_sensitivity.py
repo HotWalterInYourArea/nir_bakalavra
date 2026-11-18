@@ -18,8 +18,6 @@ from eval_dataset import EvalDatasetBuilder
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# Define the grid of weights to test
-# Alpha (Se), Beta (Sc), Gamma (Ph)
 WEIGHT_GRID = {
     "alpha": [0.2, 0.4, 0.6],
     "beta":  [0.2, 0.4, 0.6],
@@ -28,7 +26,6 @@ WEIGHT_GRID = {
 }
 
 def run_sensitivity_analysis():
-    # 1. Load Data & Graph
     logger.info("Loading dataset...")
     qa_pairs = EvalDatasetBuilder.load("eval_dataset.json")
     questions = [p.question for p in qa_pairs]
@@ -45,7 +42,6 @@ def run_sensitivity_analysis():
     G = graph_loader.load_graph(node_label="Resource")
     logger.info("Graph loaded: %d nodes, %d edges", G.number_of_nodes(), G.number_of_edges())
 
-    # 2. Run Vector Search ONCE (Cache results)
     logger.info("Running vector search for all questions (this takes a moment)...")
     embedder = SentenceTransformerEmbeddings(model=CONFIG.embedding.model)
     vector_retriever = VectorRetriever(
@@ -58,17 +54,14 @@ def run_sensitivity_analysis():
     cached_retrievals = []
     for i, q in enumerate(questions):
         result = vector_retriever.search(query_text=q, top_k=10)
-        # Extract elementIds from the search results
         eids = [item.metadata.get("id") for item in result.items if item.metadata and "id" in item.metadata]
         cached_retrievals.append(eids)
         if (i + 1) % 20 == 0:
             logger.info("Cached retrieval %d/%d", i + 1, len(questions))
 
-    # 3. Grid Search over Weights
     logger.info("Starting Grid Search...")
     results = []
     
-    # Pre-instantiate GCR with a dummy config, we will override weights later
     gcr_engine = GraphContextRelevance(G, config=GCRConfig())
 
     combinations = list(itertools.product(
@@ -85,7 +78,6 @@ def run_sensitivity_analysis():
         total_sc = 0.0
         total_ph = 0.0
 
-        # Override weights in the engine
         gcr_engine.cfg.alpha = alpha
         gcr_engine.cfg.beta = beta
         gcr_engine.cfg.gamma = gamma
@@ -95,20 +87,14 @@ def run_sensitivity_analysis():
             if not seed_eids:
                 continue
 
-            # Compute initial GCR
             res = gcr_engine.score(seed_eids, q)
             
-            # If below threshold, simulate expansion (1-hop)
             if res.gcr < threshold:
-                # Expand context in memory using networkx
                 expanded_eids = set(seed_eids)
                 for seed in seed_eids:
                     if seed in G:
                         expanded_eids.update(G.neighbors(seed))
-                # Limit expansion size
                 expanded_eids = list(expanded_eids)[:20]
-                
-                # Recompute GCR on expanded
                 res = gcr_engine.score(expanded_eids, q)
 
             total_gcr += res.gcr

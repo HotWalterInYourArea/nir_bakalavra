@@ -34,7 +34,7 @@ class Evaluator:
         # Локальная judge-LLM через Ollama
         self.llm = LangchainLLMWrapper(
             ChatOllama(
-                model=CONFIG.llm.model,
+                model=CONFIG.llm.eval_model,
                 base_url=CONFIG.llm.ollama_base_url,
                 temperature=0,
             )

@@ -17,7 +17,7 @@ os.makedirs(FIG_DIR, exist_ok=True)
 os.makedirs(TAB_DIR, exist_ok=True)
 
 def load_data():
-    with open("results/full_results.json", "r", encoding="utf-8") as f:
+    with open("results/full_results_llama.json", "r", encoding="utf-8") as f:
         return json.load(f)
 
 def generate_tables(data):
@@ -138,21 +138,37 @@ def generate_figures(data):
         plt.savefig(f"{FIG_DIR}/fig3_gcr_distribution.png", dpi=300)
         plt.close()
 
-    # Figure 4: Boxplot - Hallucination Rate
-    # Simulating per-query hallucination rates based on RAGAS outputs
-    # (In a real run, you would save per-sample scores from RAGAS)
-    baseline_hr = [data["baseline_metrics"]["hallucination_rate"]] * 10 # Placeholder
-    gcr_hr = [data["gcr_metrics"]["hallucination_rate"]] * 10 # Placeholder
-    
+    # Figure 4: Bar chart — Hallucination Rate
     fig, ax = plt.subplots(figsize=(8, 6))
-    sns.boxplot(data=[baseline_hr, gcr_hr], palette=["#1f77b4", "#ff7f0e"], ax=ax)
-    ax.set_xticks([0, 1])
-    ax.set_xticklabels(["Baseline", "GCR"])
+    
+    baseline_hr = data["baseline_metrics"]["hallucination_rate"]
+    gcr_hr = data["gcr_metrics"]["hallucination_rate"]
+    
+    bars = ax.bar(
+        ["Baseline", "GCR"],
+        [baseline_hr, gcr_hr],
+        color=["#1f77b4", "#ff7f0e"],
+        edgecolor="white",
+        linewidth=1.5,
+    )
+    
+    for bar, v in zip(bars, [baseline_hr, gcr_hr]):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.005,
+            f"{v:.3f}",
+            ha="center",
+            fontsize=11,
+            fontweight="bold",
+        )
+    
     ax.set_ylabel("Hallucination Rate")
-    ax.set_title("Hallucination Rate Comparison")
+    ax.set_title("Hallucination Rate: Baseline vs GCR", fontsize=14)
+    ax.set_ylim(0, max(baseline_hr, gcr_hr) * 1.2)
     plt.tight_layout()
-    plt.savefig(f"{FIG_DIR}/fig4_hallucination_boxplot.png", dpi=300)
+    plt.savefig(f"{FIG_DIR}/fig4_hallucination_bar.png", dpi=300)
     plt.close()
+    print(f"  ✓ {FIG_DIR}/fig4_hallucination_bar.png")
 
     # Figure 5: Pie Chart - Rejection Rate
     if gcr_meta:

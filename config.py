@@ -31,6 +31,7 @@ class LLMConfig:
     """Локальная LLM через Ollama."""
     provider: str = "ollama"
     model: str = os.getenv("LLM_MODEL", "llama3.1")
+    eval_model: str = os.getenv("LLM_MODEL", "llama3.1")
     temperature: float = 0.0
     ollama_base_url: str = os.getenv(
         "OLLAMA_BASE_URL", "http://localhost:11434"
